@@ -19,6 +19,7 @@ from app.window_pin import WindowPinner
 from app.style import build_style, DEFAULT_THEME
 from app.version import APP_NAME
 from app.updater import UpdateChecker
+from app.toast import Toast
 
 
 def _logo_path() -> str:
@@ -70,11 +71,14 @@ class TrayApp(QObject):
         self._app = app
         self._cfg = load_config()
         self._workers = []           # keep references alive
+        self._ocr_inflight = 0       # 在飞 OCR 数:>0 时浮层显示「识别中」
         self._result_windows = []
         self._pin_windows = []       # 贴图浮窗,保持引用
         self._screenshot_widget = None
         self._settings_win = None
         self._warmup_lock = threading.Lock()   # 串行化 warmup,避免并发改 providers 状态
+        # 应用内浮层提示(右下角,不依赖会被 Win11 静默吞掉的托盘气泡):OCR 进行中/失败用它
+        self._toast = Toast(self._cfg.get("theme_color", DEFAULT_THEME))
 
         # Warmup: probe all OCR + translation providers in background
         self._rewarmup()
@@ -319,7 +323,11 @@ class TrayApp(QObject):
         self._search_win = win
         win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         win.closed.connect(self._on_search_closed)
-        win.destroyed.connect(lambda *_: setattr(self, "_search_win", None))
+        # 仅当被销毁的正是当前持有的窗口时才清引用:否则「关旧窗→立刻开新窗→旧窗
+        # 异步 destroyed」的时序会把刚开的新窗引用误清掉(见 review 2.6)。
+        win.destroyed.connect(
+            lambda *_: setattr(self, "_search_win", None)
+            if getattr(self, "_search_win", None) is win else None)
         win.show()
 
     def _make_search_engine(self, kind):
@@ -360,7 +368,7 @@ class TrayApp(QObject):
 
     def _on_search_closed(self):
         """搜索窗关闭:根据 keep_helper_alive 决定是否落盘退出 helper(见配置)。Everything 无需收尾。"""
-        if not self._cfg.get("keep_helper_alive", True):
+        if not self._cfg.get("keep_helper_alive", False):
             # 用户选择零后台:通知自研 helper 落盘退出
             try:
                 from app.file_search_client import IndexClient
@@ -372,16 +380,16 @@ class TrayApp(QObject):
 
     # ── Clipboard ─────────────────────────────────────────────────────────────
     def _on_clipboard_image(self, image_bytes: bytes):
-        self._tray.showMessage("OCR", "检测到剪贴板图片，识别中…", QSystemTrayIcon.MessageIcon.Information, 2000)
-        self._run_ocr(image_bytes, notify=False)
+        # 「识别中」由 _run_ocr 的应用内浮层统一显示(不再用会被 Win11 静默吞掉的托盘气泡)
+        self._run_ocr(image_bytes)
 
     # ── OCR dispatch ─────────────────────────────────────────────────────────
-    def _run_ocr(self, image_bytes: bytes, rect=None, notify: bool = True):
+    def _run_ocr(self, image_bytes: bytes, rect=None):
         self._cfg = load_config()  # reload in case settings changed
-        # 主动截图路径给「识别中」反馈,否则首个接口超时可达 20s,用户框选完会以为没反应。
-        # 剪贴板路径已自带 toast,传 notify=False 避免重复弹。
-        if notify:
-            self._tray.showMessage("OCR", "识别中…", QSystemTrayIcon.MessageIcon.Information, 1500)
+        # 应用内浮层显示「识别中」:首个接口超时可达 20s,无反馈用户会以为没反应。
+        # 浮层一定可见(不像托盘气泡会被专注助手/通知设置吞掉),进行中常驻直到出结果/失败。
+        self._ocr_inflight += 1
+        self._toast.show_loading("识别中")
         worker = OCRWorker(image_bytes, self._cfg.get("providers", []))
         worker.ocr_done.connect(self._show_result)
         worker.failed.connect(self._show_error)
@@ -403,6 +411,10 @@ class TrayApp(QObject):
             lst.remove(item)
 
     def _show_result(self, text: str, provider: str):
+        # 成功:收起「识别中」浮层(全部在飞都完成后),结果窗本身已是明确反馈。
+        self._ocr_inflight = max(0, self._ocr_inflight - 1)
+        if self._ocr_inflight == 0:
+            self._toast.dismiss()
         win = ResultWindow(initial_text=text, provider_name=provider,
                            auto_translate=self._cfg.get("auto_translate", False))
         self._result_windows.append(win)
@@ -411,7 +423,10 @@ class TrayApp(QObject):
         win.show()
 
     def _show_error(self, msg: str):
-        self._tray.showMessage("OCR 失败", msg, QSystemTrayIcon.MessageIcon.Critical, 4000)
+        # 失败:浮层显示红色错误(几秒自动淡出)。绝不只靠托盘气泡——那会被静默吞掉,
+        # 表现为「识别完全没反应」。msg 已是 humanize_error 的可读中文(且已脱敏)。
+        self._ocr_inflight = max(0, self._ocr_inflight - 1)
+        self._toast.show_error(f"识别失败:{msg}")
 
     # ── Settings ──────────────────────────────────────────────────────────────
     def _open_settings(self):
@@ -442,6 +457,7 @@ class TrayApp(QObject):
         # 主题色可能变了:对整个 app 重套样式,所有窗口即时换色
         self._app.setStyleSheet(build_style(self._cfg.get("theme_color", DEFAULT_THEME)))
         self._window_pinner.set_theme(self._cfg.get("theme_color", DEFAULT_THEME))
+        self._toast.set_accent(self._cfg.get("theme_color", DEFAULT_THEME))   # 浮层强调条同步换色
 
     def _on_settings_closed(self, *_):
         self._settings_win = None
@@ -498,6 +514,10 @@ class TrayApp(QObject):
             pass
         try:
             self._monitor.stop()        # 停剪贴板轮询定时器
+        except Exception:
+            pass
+        try:
+            self._toast.dismiss()       # 收起浮层提示(停其定时器/动画)
         except Exception:
             pass
         # 等在飞的 OCR worker 结束,避免 QThread 仍运行时随进程销毁而崩溃
