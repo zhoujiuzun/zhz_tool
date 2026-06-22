@@ -19,4 +19,8 @@ build/
 debug_probe.log
 *.log
 
-# 注:OCRTool.spec 是构建配置,需入库(release.ps1 与他人从源码构建都要用),故不忽略 .spec
+# Everything SDK / 源码下载(参考资料,体积大、可从官网重新下载,不入库;
+# 实际运行用的 app/Everything64.dll 仍入库)
+everythingcode/
+
+# 注:OCRTool.spec 是构建配置,需入库(build.ps1 与他人从源码构建都要用),故不忽略 .spec

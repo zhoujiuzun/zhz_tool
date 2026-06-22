@@ -12,7 +12,7 @@
 
 ## 决策
 
-1. **引擎抽象 = 上层契约不变,底层可换**:搜索窗只依赖一组方法(search / advanced_search / drives / len / ping),两个引擎各自实现。切换引擎**不改变搜索语义**(名字/路径/不含内容、三模式、高级条件、结果呈现一致),只改变"由谁来搜"。见 CONTEXT.md「搜索引擎」。
+1. **引擎抽象 = 上层契约不变,底层可换**:搜索窗只依赖一组方法(search / advanced_search / drives / len / ping),两个引擎各自实现。切换引擎**不改变搜索语义**(名字/路径/不含内容、三模式、高级条件、结果呈现一致),只改变"由谁来搜"。见 docs/CONTEXT.md「搜索引擎」。
 
 2. **Everything 引擎 = 硬依赖运行中的 Everything + 检测回退;只捆绑 SDK 桩、不捆绑 Everything**:搜索委托用户本机**已安装且正在运行**的 Everything,经其 **SDK DLL(`Everything64.dll`,约 88KB 的 IPC 桩)** 通信。该桩**仅是进程间通信封装,Everything 没运行时它什么也查不到**——故"捆绑这个桩"与"分发 Everything 引擎本体"是两回事。运行时**优先探测用户 Everything 安装目录里的 DLL**,找不到才用捆绑副本(版本兜底)。检测不到 Everything 进程在运行时,搜索设置中该选项**置灰并提示「需先安装并运行 Everything」**,并**自动回退到自研引擎**。**不捆绑、不分发 Everything 程序本体**(避免体积膨胀、分发授权问题,保住 0004 的"单文件纯 ctypes、零编译依赖"基线;88KB 桩不破坏该基线)。
 

@@ -2,7 +2,7 @@
 """全局样式:由单一「主题色」派生整套清新风配色,生成 QSS。
 
 用户在「设置→通用」选一个主题色,本模块据它派生 背景/按钮/悬停/选中/边框/滚动条 等
-全部衍生色(正文文字固定深灰,保证任何主题色下可读)。见 CONTEXT.md「主题色」。
+全部衍生色(正文文字固定深灰,保证任何主题色下可读)。见 docs/CONTEXT.md「主题色」。
 """
 from string import Template
 from PyQt6.QtGui import QColor

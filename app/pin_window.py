@@ -33,7 +33,7 @@ class PinWindow(QWidget):
     def __init__(self, image_bytes: bytes, rect: QRect = None):
         super().__init__()
         self._always_on_top = True
-        self._priority = self.PRIORITY_DEFAULT   # 贴图优先级 1~5(1 最高),见 CONTEXT.md「贴图优先级」
+        self._priority = self.PRIORITY_DEFAULT   # 贴图优先级 1~5(1 最高),见 docs/CONTEXT.md「贴图优先级」
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint |
                             Qt.WindowType.WindowStaysOnTopHint |
                             Qt.WindowType.Tool)
