@@ -5,7 +5,7 @@
 软件用它和 GitHub 最新 release 比较，判断是否有新版（见 app/updater.py）。
 """
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 # 软件名 + 开源地址（关于页、更新检查共用，单一来源）
 APP_NAME = "zhz_tool"

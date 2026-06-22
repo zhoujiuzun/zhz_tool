@@ -419,6 +419,11 @@ class SearchWindow(QWidget):
         重新轮询就绪态 → 完成后恢复 UI。重扫耗时 ~30 秒。
         """
         from app.file_search_client import IndexClient
+        # 重入保护:旧 worker 仍在跑时不再起新的(按钮虽已同步禁用,这里兜底防止
+        # 经其他路径重复触发导致旧 QThread 引用被覆盖、信号重复触发)。
+        old = getattr(self, "_rescan_worker", None)
+        if old is not None and old.isRunning():
+            return
         self._is_refreshing = True  # 标记为刷新状态,就绪后显示"索引已更新"
         if self._refresh_btn:
             self._refresh_btn.setEnabled(False)
@@ -643,4 +648,21 @@ class SearchWindow(QWidget):
 
     def closeEvent(self, e):
         self.closed.emit()
+        # 窗口设了 WA_DeleteOnClose:关窗即销毁。若后台 QThread 仍在跑,其 Python 对象随窗体
+        # 回收会触发 Qt「QThread: Destroyed while thread is still running」abort 崩溃。
+        # 与 OCRWorker/_TestWorker/_TranslateWorker 同一防御:逐个等其结束再放行。
+        # _rescan_worker 阻塞约 30s、_ready/drives 探测数秒,故给足超时。
+        self._stop_workers()
         super().closeEvent(e)
+
+    def _stop_workers(self):
+        """等所有在飞后台线程结束(防 WA_DeleteOnClose 下 QThread 运行中被销毁崩溃)。"""
+        workers = [getattr(self, n, None) for n in
+                   ("_worker", "_adv_worker", "_drives_worker", "_rescan_worker")]
+        workers += list(getattr(self, "_ready_workers", []))
+        for w in workers:
+            try:
+                if w is not None and w.isRunning():
+                    w.wait(3000)
+            except RuntimeError:
+                pass   # 底层 C++ 对象可能已被回收,忽略

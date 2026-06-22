@@ -304,7 +304,11 @@ class Helper:
                     with self._lock:
                         import time, os
                         t0 = time.time()
-                        self._index = None              # 释放旧索引
+                        # ★ 必须是全新空索引而非 None:prepare() 第一行就调 self._index.load(),
+                        # 置 None 会 AttributeError 打死处理线程、helper 此后名存实亡(全 0)。
+                        self._index = FileIndex()       # 释放旧索引,换全新空索引
+                        self._graph = {}                # 同步清旧 FRN 图,避免重扫时与残图混用
+                        self._graph_ready = False
                         # 删除存档文件,强制 prepare() 重新扫描(否则会直接加载)
                         for ext in ['', '.pblob', '.lblob']:
                             try:

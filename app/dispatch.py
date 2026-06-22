@@ -12,7 +12,24 @@
 """
 import threading
 import concurrent.futures
+import re
 import requests
+
+
+# 错误信息脱敏:requests 的 HTTPError 文本含完整 URL,Google/Gemini 把 key 放在 ?key=... 查询串里,
+# 直接展示到 UI/状态栏会泄露密钥(可能被截图/转写进别的日志)。返回给用户前先打码。
+# 与 main.py 的崩溃日志脱敏同源。
+_SCRUB = [
+    (re.compile(r'((?:access_token|api_key|secret_key|token|key|password|sign|signature)'
+                r'["\']?\s*[=:]\s*["\']?)([^\s"\'&,}]+)', re.I), r'\1<redacted>'),
+    (re.compile(r'(Authorization["\']?\s*[=:]\s*["\']?)([^"\'},\n]+)', re.I), r'\1<redacted>'),
+]
+
+
+def _scrub(text: str) -> str:
+    for pat, repl in _SCRUB:
+        text = pat.sub(repl, text)
+    return text
 
 
 def humanize_error(e: Exception) -> str:
@@ -43,7 +60,7 @@ def humanize_error(e: Exception) -> str:
             return f"接口服务器错误({code}),请稍后再试"
         return f"接口返回错误{f'({code})' if code else ''}"
     msg = str(e).strip()
-    return msg or e.__class__.__name__
+    return _scrub(msg) if msg else e.__class__.__name__
 
 
 def _default_is_configured(p: dict) -> bool:
