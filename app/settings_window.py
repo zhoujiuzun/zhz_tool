@@ -588,6 +588,15 @@ class SettingsWindow(QWidget):
         wt_hint.setWordWrap(True)
         form.addRow(wt_hint)
 
+        # ── 文件搜索热键(默认关闭=空)──
+        self._fsearch_key = HotkeyEdit(self._data.get("file_search_hotkey", ""))
+        self._fsearch_key.changed.connect(self._on_fsearch_key_changed)
+        form.addRow("文件搜索热键", self._fsearch_key)
+        fs_hint = QLabel("可选:设一个全局热键随时打开文件搜索窗。留空=不启用(默认)。")
+        fs_hint.setObjectName("info")
+        fs_hint.setWordWrap(True)
+        form.addRow(fs_hint)
+
         # ── 功能可见性 ──
         vis_hint = QLabel("功能可见性（取消勾选可隐藏对应的菜单入口/设置页，减少干扰）：")
         vis_hint.setObjectName("info")
@@ -600,6 +609,7 @@ class SettingsWindow(QWidget):
                            ("macro", "宏（宏设置页）"),
                            ("pin", "截图贴图"),
                            ("window_top", "窗口置顶"),
+                           ("file_search", "文件搜索"),
                            ("autostart", "开机自启动"),
                            ("reset_engine", "重置接口状态")):
             cb = QCheckBox(label)
@@ -648,9 +658,14 @@ class SettingsWindow(QWidget):
         """点「检查更新」:后台查 GitHub 最新版,结果回 _on_update_checked。"""
         self._update_btn.setEnabled(False)
         self._update_status.setText("正在检查…")
-        self._uc = UpdateChecker()
-        self._uc.result_ready.connect(self._on_update_checked)
-        self._uc.start()
+        if not hasattr(self, "_ucs"):
+            self._ucs = []          # 持有 checker 引用,防线程对象在运行中被 GC
+        uc = UpdateChecker()
+        self._ucs.append(uc)
+        uc.result_ready.connect(self._on_update_checked)
+        # 引用清理挂 finished(run() 真正返回后才发),避免线程未结束就被销毁 → Qt 致命 abort
+        uc.finished.connect(lambda c=uc: self._ucs.remove(c) if c in self._ucs else None)
+        uc.start()
 
     def _on_update_checked(self, result):
         """检查结果回调(主线程)。result: dict 或 None(网络失败)。"""
@@ -712,6 +727,11 @@ class SettingsWindow(QWidget):
     def _on_wintop_key_changed(self):
         """窗口置顶热键改了:写 data + 防抖落盘(托盘 applied 再重注册该全局热键)。"""
         self._data["window_top_hotkey"] = self._wintop_key.value().strip()
+        self._schedule()
+
+    def _on_fsearch_key_changed(self):
+        """文件搜索热键改了:写 data + 防抖落盘(托盘 applied 再重注册该全局热键)。"""
+        self._data["file_search_hotkey"] = self._fsearch_key.value().strip()
         self._schedule()
 
     def _on_vis_toggled(self, key: str):

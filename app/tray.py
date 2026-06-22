@@ -108,6 +108,8 @@ class TrayApp(QObject):
 
         # 窗口置顶全局热键(默认 Ctrl+Alt+T,可在通用里改);WindowPinner 已在菜单前创建
         self._register_window_top_hotkey()
+        self._register_file_search_hotkey()   # 文件搜索全局热键(默认关闭)
+        self._search_win = None               # 当前文件搜索窗(单例)
 
         # 启动后延迟 5 秒静默检查更新:有新版才弹气泡,无新版/网络失败均不打扰
         self._update_checkers = []          # 持有 UpdateChecker 引用,防被 GC
@@ -126,6 +128,8 @@ class TrayApp(QObject):
         # 「置顶当前窗口」菜单项已移除:菜单触发取窗不可靠,改为只用全局热键(Ctrl+Alt+T)置顶。
         if vis.get("translate", True):
             menu.addAction("翻译").triggered.connect(self._open_translate)
+        if vis.get("file_search", True):
+            menu.addAction("文件搜索").triggered.connect(self._open_file_search)
 
         menu.addSeparator()
 
@@ -142,6 +146,8 @@ class TrayApp(QObject):
 
         menu.addSeparator()
         menu.addAction("设置").triggered.connect(self._open_settings)       # 红线:常显
+        if vis.get("file_search", True):
+            menu.addAction("停止后台索引").triggered.connect(self._stop_helper)
         menu.addSeparator()
         menu.addAction("退出").triggered.connect(self._quit)                # 红线:常显
 
@@ -152,13 +158,16 @@ class TrayApp(QObject):
         失败/无新版均不打扰。结果回 _on_update_checked。"""
         uc = UpdateChecker()
         self._update_checkers.append(uc)        # 持有引用,防线程对象被 GC
-        uc.result_ready.connect(lambda r, c=uc: self._on_update_checked(r, c, silent))
+        uc.result_ready.connect(lambda r: self._on_update_checked(r, silent))
+        # ★ 引用清理挂到 QThread 自带的 finished(run() 真正返回后才发),而非 result_ready。
+        #   否则在 run() 内 emit 的 result_ready 回调里删引用 → 线程未结束就被 GC →
+        #   Qt qFatal「QThread: Destroyed while thread is still running」→ 0xc0000409 闪退。
+        uc.finished.connect(lambda c=uc: self._update_checkers.remove(c)
+                            if c in self._update_checkers else None)
         uc.start()
 
-    def _on_update_checked(self, result, checker, silent):
+    def _on_update_checked(self, result, silent):
         """检查结果(主线程)。有新版弹气泡,点击气泡打开 release 页。"""
-        if checker in self._update_checkers:
-            self._update_checkers.remove(checker)
         if not result or not result.get("has_update"):
             return                              # 无新版 / 失败 → 静默(开机检查不打扰)
         self._pending_update_url = result["url"]
@@ -196,6 +205,22 @@ class TrayApp(QObject):
         if not self._hotkey_mgr.register("window_top", key, self._toggle_window_top):
             self._tray.showMessage(
                 "窗口置顶", f"热键「{key}」注册失败(可能被占用),请在设置→通用改键。",
+                QSystemTrayIcon.MessageIcon.Warning, 4000)
+
+    def _register_file_search_hotkey(self):
+        """注册/重注册文件搜索全局热键(默认关闭=空;可在通用里自定义)。
+
+        留空或模块隐藏则注销。键按下=打开文件搜索窗(等同点托盘「文件搜索」)。
+        """
+        self._cfg = load_config()
+        key = (self._cfg.get("file_search_hotkey", "") or "").strip()
+        vis = self._cfg.get("feature_visibility", {}).get("file_search", True)
+        if not key or not vis:
+            self._hotkey_mgr.unregister("file_search")
+            return
+        if not self._hotkey_mgr.register("file_search", key, self._open_file_search):
+            self._tray.showMessage(
+                "文件搜索", f"热键「{key}」注册失败(可能被占用),请在设置→通用改键。",
                 QSystemTrayIcon.MessageIcon.Warning, 4000)
 
     def _on_pin_done(self, msg: str):
@@ -268,6 +293,83 @@ class TrayApp(QObject):
         win.destroyed.connect(lambda *_: self._drop_from(self._result_windows, win))
         win.show()
 
+    # ── File Search ───────────────────────────────────────────────────────────
+    def _open_file_search(self):
+        """打开文件搜索窗。首次会装提权计划任务(弹一次 UAC),之后静默拉起 helper。
+
+        关窗时通知 helper 落盘并退出(按搜索窗启停,见 ADR-0004)。
+        """
+        if getattr(self, "_search_win", None) is not None:
+            self._search_win.raise_()
+            self._search_win.activateWindow()
+            return
+        from app import search_engine as se
+
+        self._cfg = load_config()
+        kind = se.default_engine_kind(self._cfg.get("file_search_engine", ""))
+        engine, actual_kind, err = self._make_search_engine(kind)
+        if engine is None:
+            self._tray.showMessage("文件搜索", err or "搜索服务启动失败,已取消。",
+                                   QSystemTrayIcon.MessageIcon.Warning, 4000)
+            return
+
+        from app.search_window import SearchWindow
+        win = SearchWindow(engine, self._make_search_engine,
+                           everything_available=se.everything_available())
+        self._search_win = win
+        win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        win.closed.connect(self._on_search_closed)
+        win.destroyed.connect(lambda *_: setattr(self, "_search_win", None))
+        win.show()
+
+    def _make_search_engine(self, kind):
+        """造引擎并处理生命周期(供 _open_file_search 初次 + SearchWindow 切换时调)。
+
+        返回 (engine, actual_kind, err)。Everything 不可用会回退自研。自研引擎需确保提权 helper
+        在跑(首次装计划任务弹一次 UAC);Everything 不碰 helper。切到非自研时把自研 helper 落盘退出。
+        持久化用户选择(actual_kind)到 config(见 ADR-0005)。
+        """
+        from app import search_engine as se
+        from app import file_search_task as task
+        engine, actual_kind, fell_back = se.make_engine(kind)
+        if actual_kind == se.ENGINE_NATIVE:
+            # 自研:确保提权 helper 在跑。★ 不在此 probe(会卡主线程);交给 SearchWindow 的
+            # _poll_ready 后台线程探测,未就绪时自动安装+拉起 helper(见 _open_file_search 注释)。
+            # 首次装计划任务会弹一次 UAC(task.install),这里只确保任务已安装。
+            if not task.is_installed():
+                if not task.install():          # 弹一次 UAC;拒绝/失败则中止
+                    return None, None, "需要安装搜索服务(管理员权限)才能使用,已取消。"
+            # 静默拉起 helper(如果还没跑);不阻塞等待就绪(SearchWindow 会轮询)
+            task.run()
+        else:
+            # 切到 Everything:把自研 helper 落盘退出(零后台,见 ADR-0004/0005)
+            try:
+                from app.file_search_client import IndexClient
+                IndexClient().shutdown_helper()
+            except Exception:
+                pass
+        # 持久化用户实际所用引擎
+        if self._cfg.get("file_search_engine", "") != actual_kind:
+            self._cfg["file_search_engine"] = actual_kind
+            try:
+                save_config(self._cfg)
+            except Exception:
+                pass
+        err = "Everything 未运行,已回退自研引擎。" if fell_back else None
+        return engine, actual_kind, err
+
+    def _on_search_closed(self):
+        """搜索窗关闭:根据 keep_helper_alive 决定是否落盘退出 helper(见配置)。Everything 无需收尾。"""
+        if not self._cfg.get("keep_helper_alive", True):
+            # 用户选择零后台:通知自研 helper 落盘退出
+            try:
+                from app.file_search_client import IndexClient
+                IndexClient().shutdown_helper()
+            except Exception:
+                pass
+        # else: helper 常驻,下次打开搜索窗即用(索引已在内存)
+        self._search_win = None
+
     # ── Clipboard ─────────────────────────────────────────────────────────────
     def _on_clipboard_image(self, image_bytes: bytes):
         self._tray.showMessage("OCR", "检测到剪贴板图片，识别中…", QSystemTrayIcon.MessageIcon.Information, 2000)
@@ -335,6 +437,7 @@ class TrayApp(QObject):
         self._sync_clipboard_monitor()
         self._register_macro_hotkeys()
         self._register_window_top_hotkey()   # 用户可能改了置顶热键或隐藏了该模块
+        self._register_file_search_hotkey()  # 用户可能改了文件搜索热键或隐藏了该模块
         self._build_menu()   # 功能可见性可能变了,按最新配置重建托盘菜单
         # 主题色可能变了:对整个 app 重套样式,所有窗口即时换色
         self._app.setStyleSheet(build_style(self._cfg.get("theme_color", DEFAULT_THEME)))
@@ -366,10 +469,33 @@ class TrayApp(QObject):
                 "开机自启动", "设置失败(可能被安全策略限制),请检查权限。",
                 QSystemTrayIcon.MessageIcon.Warning, 4000)
 
+    def _stop_helper(self):
+        """手动停止后台索引 helper(释放内存)。下次打开文件搜索会重新拉起并扫描。"""
+        try:
+            from app.file_search_client import IndexClient
+            if IndexClient().ping():
+                IndexClient().shutdown_helper()
+                self._tray.showMessage(
+                    "后台索引", "已停止(释放约 50MB 内存)。下次打开文件搜索将重新扫描。",
+                    QSystemTrayIcon.MessageIcon.Information, 3000)
+            else:
+                self._tray.showMessage(
+                    "后台索引", "未在运行,无需停止。",
+                    QSystemTrayIcon.MessageIcon.Information, 2000)
+        except Exception as e:
+            self._tray.showMessage(
+                "后台索引", f"停止失败:{e}",
+                QSystemTrayIcon.MessageIcon.Warning, 3000)
+
     def _quit(self):
         self._hotkey_mgr.unregister_all()
         self._macro_engine.shutdown()   # 停录制/回放并等线程结束,避免销毁崩溃
         self._window_pinner.unpin_all()  # 解除所有外部窗口置顶,不留副作用
+        try:
+            from app.file_search_client import IndexClient
+            IndexClient().shutdown_helper()   # 通知文件搜索 helper 落盘退出,不留提权进程
+        except Exception:
+            pass
         try:
             self._monitor.stop()        # 停剪贴板轮询定时器
         except Exception:

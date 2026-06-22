@@ -90,6 +90,9 @@ def load_config() -> dict:
     # 兼容旧配置:补主题色 + 功能可见性(逐键补,将来加模块也兼容)
     data.setdefault("theme_color", DEFAULT_THEME_COLOR)
     data.setdefault("window_top_hotkey", "Ctrl+Alt+T")
+    data.setdefault("file_search_hotkey", "")
+    data.setdefault("file_search_engine", "")   # 文件搜索引擎:""=首次按检测决定;"native"/"everything"=用户已选(见 ADR-0005)
+    data.setdefault("keep_helper_alive", False)  # 文件搜索 helper 常驻:false(默认)=搜索窗关闭后退出(零后台);true=继续运行
     fv = data.setdefault("feature_visibility", _default_feature_visibility())
     for k, v in _default_feature_visibility().items():
         fv.setdefault(k, v)
@@ -126,6 +129,7 @@ def _default_feature_visibility() -> dict:
         "window_top": True,  # 窗口置顶全局热键(菜单项已移除,此开关控制热键注册与否)
         "autostart": True,   # 开机自启动菜单
         "reset_engine": True,  # 重置接口状态菜单
+        "file_search": True,   # 文件搜索菜单(Everything 式;首次用会装提权计划任务)
     }
 
 
@@ -135,6 +139,7 @@ def _default_config() -> dict:
         "auto_translate": False,
         "theme_color": DEFAULT_THEME_COLOR,
         "window_top_hotkey": "Ctrl+Alt+T",   # 窗口置顶 toggle 全局热键(可改,留空禁用)
+        "file_search_hotkey": "",             # 文件搜索全局热键,默认关闭(空=不注册);可在通用里自定义
         "feature_visibility": _default_feature_visibility(),
         "providers": default_ocr_providers(),
         "translators": _default_translators(),
