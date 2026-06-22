@@ -13,11 +13,12 @@ from PyQt6.QtWidgets import (
     QSpinBox, QTextEdit, QMessageBox, QHeaderView, QDialog,
     QFormLayout, QDialogButtonBox, QAbstractItemView, QColorDialog
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QUrl
-from PyQt6.QtGui import QColor, QDesktopServices
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtGui import QColor
 from app.config import load_config, save_config
 from app.version import __version__, APP_NAME, GITHUB_URL, GITHUB_RELEASES_URL
 from app.updater import UpdateChecker
+from app.update_flow import UpdateFlow
 from app.providers import build_provider, OCRProvider, ocr_fields_for
 from app.translators import build_translator, translation_fields_for
 from app.dispatch import humanize_error
@@ -459,9 +460,10 @@ class ProviderTab(QWidget):
 class SettingsWindow(QWidget):
     applied = pyqtSignal()   # 任何设置实时写盘后发射 → 托盘据此应用轻量副作用(剪贴板/热键)
 
-    def __init__(self, macro_engine=None, hotkey_mgr=None):
+    def __init__(self, macro_engine=None, hotkey_mgr=None, quit_fn=None):
         super().__init__()
         self._loaded = False   # 构造期护栏:控件初始 setChecked/接线时不触发写盘
+        self._quit_fn = quit_fn   # 一键更新装好后退出旧版的回调(由托盘传入)
         self.setWindowTitle("OCR / 翻译 设置")
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
         # 关窗即销毁:① 旧 MacroTab 随之析构,断开其与引擎的信号连接,避免多次
@@ -675,17 +677,11 @@ class SettingsWindow(QWidget):
             return
         if result["has_update"]:
             self._update_status.setText(f"发现新版本 v{result['latest']}（当前 v{result['current']}）")
-            box = QMessageBox(self)
-            box.setWindowTitle("发现新版本")
-            box.setText(f"有新版本 v{result['latest']} 可用（当前 v{result['current']}）。\n是否前往 GitHub 下载？")
-            notes = result.get("notes") or ""
-            if notes:
-                box.setDetailedText(notes)
-            go = box.addButton("前往下载", QMessageBox.ButtonRole.AcceptRole)
-            box.addButton("稍后", QMessageBox.ButtonRole.RejectRole)
-            box.exec()
-            if box.clickedButton() is go:
-                QDesktopServices.openUrl(QUrl(result["url"]))
+            # 走一键更新:对话框「立即更新」→ 下载 → 静默提权装 → 退出重启(quit_fn 由托盘传入)。
+            # 进度框/对话框以设置窗为父。无 quit_fn(理论不会)时退化为仅提示。
+            if not hasattr(self, "_update_flow"):
+                self._update_flow = UpdateFlow(quit_fn=self._quit_fn or (lambda: None), parent=self)
+            self._update_flow.offer(result)
         elif result.get("no_release"):
             self._update_status.setText(f"仓库暂无发布版本（当前 v{result['current']}）。")
         else:

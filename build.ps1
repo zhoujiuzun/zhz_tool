@@ -77,6 +77,20 @@ if (-not $iscc) { Fail "找不到 Inno Setup 6 的 ISCC.exe。请先安装 Inno 
 if ($LASTEXITCODE -ne 0) { Fail "Inno Setup 编译失败" }
 if (-not (Test-Path $setupPath)) { Fail "未生成 $setupPath" }
 
+# ── 4.5 生成 SHA256SUMS.txt(一键更新下载后校验安装包用)─────────────────────────
+Step "生成 SHA256SUMS.txt"
+$sumsPath = "dist\SHA256SUMS.txt"
+$lines = @()
+foreach ($f in @($setupPath, $zipPath)) {
+    $h = (Get-FileHash -Algorithm SHA256 -Path $f).Hash.ToLower()
+    # sha256sum 标准格式:`<hex>  <filename>`(两个空格;updater._pick_sha256 按文件名匹配)
+    $lines += "$h  $(Split-Path $f -Leaf)"
+}
+# 用 UTF8 无 BOM 写,避免校验解析时把 BOM 当进 hex
+[System.IO.File]::WriteAllText((Resolve-Path -LiteralPath "dist").Path + "\SHA256SUMS.txt",
+    ($lines -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+Write-Host "    $sumsPath"
+
 # ── 5. 汇总 ────────────────────────────────────────────────────────────────────
 Step "构建完成"
 Get-Item $distApp\zhz_tool.exe, $zipPath, $setupPath |
@@ -90,9 +104,9 @@ if ($Publish) {
     if ($LASTEXITCODE -ne 0) {
         Fail "Release v$ver 不存在。请先手动建好该 Release(含发布说明),再用 -Publish 上传附件。"
     }
-    & gh release upload "v$ver" $zipPath $setupPath --clobber
+    & gh release upload "v$ver" $zipPath $setupPath $sumsPath --clobber
     if ($LASTEXITCODE -ne 0) { Fail "上传附件失败" }
-    Write-Host "    已上传:$($setupName) + $(Split-Path $zipPath -Leaf)" -ForegroundColor Green
+    Write-Host "    已上传:$($setupName) + $(Split-Path $zipPath -Leaf) + SHA256SUMS.txt" -ForegroundColor Green
 } else {
     Write-Host "`n(未发布。如需上传到已存在的 v$ver Release,加 -Publish 重跑。)" -ForegroundColor DarkGray
 }

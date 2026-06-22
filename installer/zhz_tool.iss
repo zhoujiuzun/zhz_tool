@@ -71,8 +71,10 @@ Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-; 安装完成可勾选立即运行(普通权限运行,不带管理员——与日常使用一致)
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchAfter}"; Flags: nowait postinstall skipifsilent runasoriginaluser
+; 安装完成后运行程序(普通权限,不带管理员——与日常使用一致)。
+; 不加 skipifsilent:一键更新走静默安装(/VERYSILENT),装完也要自动重启到新版;
+; 交互安装时 postinstall 仍显示为「立即运行」勾选项。
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchAfter}"; Flags: nowait postinstall runasoriginaluser
 
 [Code]
 { 安装/卸载前强制结束仍在跑的程序与文件搜索 helper,避免文件被占用导致写入失败。

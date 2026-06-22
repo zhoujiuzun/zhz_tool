@@ -1,8 +1,8 @@
 """System tray application — main entry point for all features."""
 import threading
 from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QApplication
-from PyQt6.QtGui import QIcon, QPixmap, QColor, QDesktopServices
-from PyQt6.QtCore import QObject, pyqtSignal, QThread, Qt, QTimer, QUrl
+from PyQt6.QtGui import QIcon, QPixmap, QColor
+from PyQt6.QtCore import QObject, pyqtSignal, QThread, Qt, QTimer
 
 from app.config import (load_config, save_config, save_macro, load_macro,
                         list_macros, migrate_macro_play_hotkey)
@@ -20,6 +20,7 @@ from app.style import build_style, DEFAULT_THEME
 from app.version import APP_NAME
 from app.updater import UpdateChecker
 from app.toast import Toast
+from app.update_flow import UpdateFlow
 
 
 def _logo_path() -> str:
@@ -115,8 +116,10 @@ class TrayApp(QObject):
         self._register_file_search_hotkey()   # 文件搜索全局热键(默认关闭)
         self._search_win = None               # 当前文件搜索窗(单例)
 
-        # 启动后延迟 5 秒静默检查更新:有新版才弹气泡,无新版/网络失败均不打扰
+        # 启动后延迟 5 秒静默检查更新:有新版才弹「一键更新」对话框,无新版/网络失败均不打扰
         self._update_checkers = []          # 持有 UpdateChecker 引用,防被 GC
+        # 一键更新编排器(对话框→下载→静默提权装→退出重启);quit 用本类的 _quit
+        self._update_flow = UpdateFlow(quit_fn=self._quit, parent=None)
         QTimer.singleShot(5000, lambda: self._check_update(silent=True))
 
     # ── Menu ──────────────────────────────────────────────────────────────────
@@ -171,25 +174,14 @@ class TrayApp(QObject):
         uc.start()
 
     def _on_update_checked(self, result, silent):
-        """检查结果(主线程)。有新版弹气泡,点击气泡打开 release 页。"""
+        """检查结果(主线程)。有新版 → 走一键更新流程(对话框,不再用会被吞的托盘气泡)。
+
+        silent 仅影响「无新版/失败」时是否提示:开机自动检查静默,手动检查由设置窗自己反馈。
+        """
         if not result or not result.get("has_update"):
             return                              # 无新版 / 失败 → 静默(开机检查不打扰)
-        self._pending_update_url = result["url"]
-        self._tray.messageClicked.connect(self._open_update_url)
-        self._tray.showMessage(
-            f"{APP_NAME} 有新版本",
-            f"发现新版本 v{result['latest']}（当前 v{result['current']}），点此前往 GitHub 下载。",
-            QSystemTrayIcon.MessageIcon.Information, 8000)
-
-    def _open_update_url(self):
-        """点击更新气泡:打开 GitHub release 页;只触发一次后断开连接。"""
-        url = getattr(self, "_pending_update_url", None)
-        if url:
-            QDesktopServices.openUrl(QUrl(url))
-        try:
-            self._tray.messageClicked.disconnect(self._open_update_url)
-        except Exception:
-            pass
+        # 复用单例 UpdateFlow:对话框「立即更新」→ 下载 → 静默提权装 → 退出重启。
+        self._update_flow.offer(result)
 
     def _toggle_window_top(self):
         """toggle 当前前台窗口的置顶状态(全局热键触发)。"""
@@ -437,7 +429,8 @@ class TrayApp(QObject):
             existing.activateWindow()
             return
         self._settings_win = SettingsWindow(macro_engine=self._macro_engine,
-                                            hotkey_mgr=self._hotkey_mgr)
+                                            hotkey_mgr=self._hotkey_mgr,
+                                            quit_fn=self._quit)
         self._settings_win.applied.connect(self._on_settings_applied)
         self._settings_win.destroyed.connect(self._on_settings_closed)
         self._settings_win.show()
