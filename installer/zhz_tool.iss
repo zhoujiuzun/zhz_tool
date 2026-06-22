@@ -8,7 +8,11 @@
 
 #define MyAppName "zhz工具箱"
 #define MyAppExeName "zhz_tool.exe"
-#define MyAppVersion "1.1.1"
+; 版本号:优先用编译时 ISCC /DMyAppVersion=x.y.z 传入(build.ps1 从 app/version.py 读),
+; 未传入时回退此默认值。保证「版本号单一来源」=app/version.py。
+#ifndef MyAppVersion
+  #define MyAppVersion "1.1.1"
+#endif
 #define MyAppPublisher "zhoujiuzun"
 #define MyAppURL "https://github.com/zhoujiuzun/zhz_tool"
 ; 计划任务名:与 app/file_search_task.py 的 TASK_NAME 必须一致(卸载时清理它)
