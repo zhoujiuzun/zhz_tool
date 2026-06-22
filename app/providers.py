@@ -134,9 +134,19 @@ class AzureOCR(OCRProvider):
         if not op_url:
             raise RuntimeError("Azure 未返回 Operation-Location,无法轮询结果")
         poll_headers = {"Ocp-Apim-Subscription-Key": self.config["api_key"]}
-        for _ in range(20):
-            time.sleep(1)
-            res = requests.get(op_url, headers=poll_headers, timeout=10)
+        # 轮询设总时钟预算(默认 60s),而非「20 次 × 每次最坏 11s = 220s」无界等待。
+        # 否则 Azure 慢响应会把 OCR 线程钉死一分多钟,期间其他接口完全没机会回退。
+        deadline = time.time() + 60
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise TimeoutError("Azure OCR 轮询超时")
+            time.sleep(min(1, remaining))
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise TimeoutError("Azure OCR 轮询超时")
+            # 单次 GET 超时也并入总预算,避免最后一次 GET 又额外阻塞满 10s
+            res = requests.get(op_url, headers=poll_headers, timeout=min(10, max(1, remaining)))
             res.raise_for_status()
             result = res.json()
             status = result.get("status")
@@ -146,10 +156,9 @@ class AzureOCR(OCRProvider):
                          for line in page.get("lines", [])]
                 return "\n".join(lines)
             if status == "failed":
-                # 失败立即抛错,不再硬等满 20 次循环误导诊断
+                # 失败立即抛错,不再硬等到超时误导诊断
                 err = result.get("error", {})
                 raise RuntimeError(f"Azure OCR 失败:{err.get('message', err or '未知错误')}")
-        raise TimeoutError("Azure OCR timeout")
 
 
 # ── Baidu ─────────────────────────────────────────────────────────────────────

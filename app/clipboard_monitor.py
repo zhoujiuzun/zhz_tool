@@ -11,6 +11,7 @@ class ClipboardMonitor(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._last_image_hash = None
+        self._last_cache_key = None
         self._timer = QTimer(self)
         self._timer.setInterval(800)
         self._timer.timeout.connect(self._check)
@@ -29,6 +30,13 @@ class ClipboardMonitor(QObject):
         img = clipboard.image()
         if img.isNull():
             return
+        # 快速判重:cacheKey() 是整数,同一份图像数据不变则键不变,零拷贝。
+        # 仅当 cacheKey 变化时才做完整像素哈希(4K BGRA 约 24MB 拷贝 + MD5),
+        # 避免每 800ms 对未变化的剪贴板做大块内存分配。
+        ck = img.cacheKey()
+        if ck == self._last_cache_key:
+            return
+        self._last_cache_key = ck
         h = hashlib.md5(img.constBits().tobytes(), usedforsecurity=False).digest()
         if h == self._last_image_hash:
             return

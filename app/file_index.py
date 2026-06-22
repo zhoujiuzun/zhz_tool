@@ -1306,18 +1306,10 @@ class FileIndex:
             f.write(self._ctime.tobytes())
             f.write(self._atime.tobytes())
             f.write(self._attr.tobytes())
-            # ★ 不再保存 size_order(已在 _rebuild_blob 禁用)
-            # f.write(self._size_order.tobytes())  # 注释掉
+            # 不再保存 size_order / 可选 order 索引(name/path/ext/mtime_order 已在
+            # _rebuild_blob 禁用,内存换速度取舍)。仅 name_offsets 是搜索必需,予以保留。
             f.write(self._offsets.tobytes())        # blob offsets
             f.write(self._path_offsets.tobytes())   # path offsets
-            # ★ 不再保存可选 order 索引(name/path/ext/mtime_order 已禁用)
-            # f.write(struct.pack("<I", 5))         # opt_count
-            # f.write(self._name_offsets.tobytes())
-            # f.write(self._name_order.tobytes())
-            # f.write(self._path_order.tobytes())
-            # f.write(self._ext_order.tobytes())
-            # f.write(self._mtime_order.tobytes())
-            # 但保留 name_offsets(名字起点数组,搜索需要)
             f.write(self._name_offsets.tobytes())
         os.replace(tmp, path)
         # 两个 blob 各写独立边车(原子落盘)。f.write 对 bytes / mmap 均可。
@@ -1373,19 +1365,9 @@ class FileIndex:
             self._ctime = _arr("d", count)
             self._atime = _arr("d", count)
             self._attr = _arr("I", count)
-            # ★ 不再读 size_order(新格式已去掉)
-            # self._size_order = _arr("I", count)
+            # 新格式不再含 size_order / 可选 order 索引(写盘侧已去掉);仅 name_offsets 保留。
             self._offsets = _arr("I", count)
             self._path_offsets = _arr("I", count)
-            # ★ 不再读可选 order 索引(新格式已去掉)
-            # opt_count = struct.unpack("<I", f.read(4))[0]
-            # opt = [None] * 5
-            # for k in range(min(opt_count, 5)):
-            #     opt[k] = _arr("I", count)
-            # self._name_order = opt[1] if opt[1] is not None else array.array('I')
-            # self._path_order = opt[2] if opt[2] is not None else array.array('I')
-            # self._ext_order = opt[3] if opt[3] is not None else array.array('I')
-            # self._mtime_order = opt[4] if opt[4] is not None else array.array('I')
             # 但保留 name_offsets(名字起点数组,搜索需要)
             self._name_offsets = _arr("I", count)
         except (EOFError, ValueError, struct.error):

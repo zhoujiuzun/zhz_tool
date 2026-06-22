@@ -6,7 +6,7 @@
 import os, sys, time, ctypes
 from ctypes import wintypes
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from app.file_index import FileIndex
 
 # ── Everything SDK ──────────────────────────────────

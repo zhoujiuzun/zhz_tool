@@ -37,10 +37,48 @@ def _safe_macro_path(name: str) -> Path:
     return path
 
 
+def _quarantine(path: Path, reason: str) -> None:
+    """把损坏文件改名隔离备份(<name>.corrupt-<时间><suffix>),留证据但不挡启动。
+
+    与 load_macro 的处理一致:坏文件不删、改名留痕,然后调用方回退默认值。
+    改名失败(如权限)时只记日志,不抛出。
+    """
+    import time as _t
+    try:
+        backup = path.with_name(f"{path.name}.corrupt-{int(_t.time())}")
+        path.rename(backup)
+        _log.error("%s 损坏(%s),已隔离备份到 %s,按默认值处理", path.name, reason, backup.name)
+    except OSError as e:
+        _log.error("%s 损坏(%s)且无法备份(%s),按默认值处理", path.name, reason, e)
+
+
+def _atomic_write_json(path: Path, data) -> None:
+    """原子写 JSON:先写临时文件 + fsync,再 os.replace 覆盖。
+
+    使「写到一半被强杀/掉电」也不会损坏正式文件(要么旧内容、要么新内容完整),
+    与 save_macro 的写法一致。
+    """
+    import os
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def _get_fernet():
     KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if not KEY_PATH.exists():
-        KEY_PATH.write_bytes(Fernet.generate_key())
+    if KEY_PATH.exists():
+        try:
+            return Fernet(KEY_PATH.read_bytes())
+        except (ValueError, OSError) as e:
+            # .key 损坏(磁盘坏道/手工改/写一半掉电):隔离备份后重新生成。
+            # 代价:旧密文(API Key 等)再也解不开,_decrypt_list 会清空并留痕,
+            # 用户需重填密钥——但 app 总能启动,优于卡死在 ValueError。
+            _quarantine(KEY_PATH, str(e))
+    KEY_PATH.write_bytes(Fernet.generate_key())
     return Fernet(KEY_PATH.read_bytes())
 
 
@@ -72,8 +110,16 @@ def _encrypt_list(items: list, fernet):
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
         return _default_config()
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("config.json 顶层不是对象")
+    except (json.JSONDecodeError, OSError, ValueError) as e:
+        # 文件截断/损坏(写一半被强杀、掉电、磁盘坏道):隔离备份后回退默认,
+        # 而不是让 json.load 抛 JSONDecodeError 把 app 卡死在启动。
+        _quarantine(CONFIG_PATH, str(e))
+        return _default_config()
     fernet = _get_fernet()
     _decrypt_list(data.get("providers", []), fernet)
     _decrypt_list(data.get("translators", []), fernet)
@@ -105,8 +151,7 @@ def save_config(data: dict):
     fernet = _get_fernet()
     _encrypt_list(save_data.get("providers", []), fernet)
     _encrypt_list(save_data.get("translators", []), fernet)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(save_data, f, ensure_ascii=False, indent=2)
+    _atomic_write_json(CONFIG_PATH, save_data)
 
 
 def _default_translators() -> list:
@@ -241,8 +286,15 @@ def migrate_macro_play_hotkey():
     """
     if not CONFIG_PATH.exists():
         return
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        raw = json.load(f)
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            return
+    except (json.JSONDecodeError, OSError, ValueError):
+        # config 损坏:不在迁移阶段处理(此函数在 load_config 之前跑),
+        # 静默跳过,交给随后的 load_config 统一隔离备份+回退默认。
+        return
     macro = raw.get("macro", {})
     old_keys = ("play_hotkey", "loop_mode", "loop_count")
     if not any(k in macro for k in old_keys):
@@ -260,6 +312,5 @@ def migrate_macro_play_hotkey():
     for k in old_keys:
         macro.pop(k, None)
     raw["macro"] = macro
-    # 直接回写原始 json(不经 save_config 的加密路径,宏段无敏感字段)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(raw, f, ensure_ascii=False, indent=2)
+    # 直接回写原始 json(不经 save_config 的加密路径,宏段无敏感字段);原子写防截断
+    _atomic_write_json(CONFIG_PATH, raw)

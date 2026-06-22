@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 import ctypes
 import faulthandler
 from PyQt6.QtWidgets import QApplication
@@ -10,6 +11,21 @@ from app.config import load_config
 from app.version import APP_NAME
 
 _crash_file = None      # 崩溃日志文件句柄(faulthandler + 异常钩子 + Qt 消息共用)
+
+# 崩溃日志脱敏:异常消息/repr 里可能带 access_token、api key、Authorization 头、
+# 或 data:image/...;base64,<整张图>。分享日志时这些不该外泄,写盘前先打码。
+_SCRUB_PATTERNS = [
+    (re.compile(r'(access_token|api_key|secret_key|token|key|password|sign|signature)'
+                r'(["\']?\s*[=:]\s*["\']?)([^\s"\'&,}]+)', re.I), r'\1\2<redacted>'),
+    (re.compile(r'(Authorization["\']?\s*[=:]\s*["\']?)([^"\'},\n]+)', re.I), r'\1<redacted>'),
+    (re.compile(r'(data:image/[\w.+-]+;base64,)[A-Za-z0-9+/=]+', re.I), r'\1<redacted>'),
+]
+
+
+def _scrub(text: str) -> str:
+    for pat, repl in _SCRUB_PATTERNS:
+        text = pat.sub(repl, text)
+    return text
 
 
 def _install_crash_logging():
@@ -30,13 +46,14 @@ def _install_crash_logging():
 
         def _hook(exc_type, exc, tb):
             f.write(f"\n[{datetime.datetime.now().isoformat()}] 未捕获异常(主线程):\n")
-            traceback.print_exception(exc_type, exc, tb, file=f)
+            f.write(_scrub("".join(traceback.format_exception(exc_type, exc, tb))))
             f.flush()
         sys.excepthook = _hook
 
         def _thook(args):
             f.write(f"\n[{datetime.datetime.now().isoformat()}] 未捕获异常(线程 {args.thread.name}):\n")
-            traceback.print_exception(args.exc_type, args.exc_value, args.exc_traceback, file=f)
+            f.write(_scrub("".join(traceback.format_exception(
+                args.exc_type, args.exc_value, args.exc_traceback))))
             f.flush()
         threading.excepthook = _thook
     except Exception:
@@ -55,7 +72,7 @@ def _filter_qt_warnings(mode, context, message):
         try:
             import datetime
             ctx = f" ({context.file}:{context.line})" if context and context.file else ""
-            _crash_file.write(f"[{datetime.datetime.now().isoformat()}] [Qt:{int(mode)}]{ctx} {message}\n")
+            _crash_file.write(_scrub(f"[{datetime.datetime.now().isoformat()}] [Qt:{int(mode)}]{ctx} {message}\n"))
             _crash_file.flush()
         except Exception:
             pass
