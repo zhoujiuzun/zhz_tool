@@ -20,6 +20,9 @@ from app.search_engine import ENGINE_NATIVE, ENGINE_EVERYTHING, ENGINE_LABELS
 _RESULT_LIMIT = 1000          # 最多渲染条数;命中更多则提示细化
 _DEBOUNCE_MS = 120            # 停手多少毫秒后才真正搜
 _MAX_READY_POLLS = 150        # 就绪轮询上限(×800ms ≈ 2分钟);超时给失败提示,不无限干等
+# 启动/加载阶段的提示尾巴:helper 被杀毒软件(如火绒)拦截时会一直起不来、长时间无结果,
+# 提前在"正在启动"阶段就告知用户,避免干等到超时才知道可能是被拦截。
+_AV_HINT = "(若长时间无结果,可能被杀毒软件拦截,请将本程序加入信任/白名单)"
 
 
 class _SearchWorker(QThread):
@@ -174,7 +177,7 @@ class SearchWindow(QWidget):
         layout.addWidget(self._tree)
 
         # 状态栏
-        self._status = QLabel("正在启动搜索服务…")
+        self._status = QLabel("正在启动搜索服务…" + _AV_HINT)
         self._status.setObjectName("info")
         layout.addWidget(self._status)
 
@@ -393,8 +396,8 @@ class SearchWindow(QWidget):
         self._count = 0
         self._tree.clear()
         self._box.setEnabled(False)
-        self._status.setText(("已回退自研引擎,正在启动…" if err else
-                              f"已切换到 {ENGINE_LABELS.get(actual_kind, actual_kind)},正在启动…"))
+        self._status.setText(("已回退自研引擎,正在启动…" + _AV_HINT if err else
+                              f"已切换到 {ENGINE_LABELS.get(actual_kind, actual_kind)},正在启动…" + _AV_HINT))
         self._ready_polls = 0
         self._ready_timer.start()
         QTimer.singleShot(0, self._poll_ready)
